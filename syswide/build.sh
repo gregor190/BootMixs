@@ -19,22 +19,73 @@ function init() {
     log "Debootstrap complete."
 }
 
-function remix() {
+remix() {
     log "Entering chroot to apply configs..."
+    # Ensure output log exists
+    mkdir -p "$(dirname "$LOGFILE")"
+
+    # Sources list
     sudo cp "$CONFIG_DIR/sources.list" "$CHROOT_DIR/etc/apt/sources.list"
+
+    # Install packages
     sudo chroot "$CHROOT_DIR" /bin/bash -c "
         apt update &&
         xargs -a /config/packages.txt apt install -y
     " | tee -a "$LOGFILE"
 
     # Apply hostname
-    echo "$(cat $CONFIG_DIR/hostname.conf)" | sudo tee "$CHROOT_DIR/etc/hostname"
+    sudo cp "$CONFIG_DIR/hostname.conf" "$CHROOT_DIR/etc/hostname"
 
     # Apply fstab
     sudo cp "$CONFIG_DIR/fstab.conf" "$CHROOT_DIR/etc/fstab"
 
-    log "Configs applied."
+    # Branding (copy into /usr/share/bootmixs/branding)
+    if [ -d "$CONFIG_DIR/branding" ]; then
+        sudo mkdir -p "$CHROOT_DIR/usr/share/bootmixs/branding"
+        sudo cp -r "$CONFIG_DIR/branding/"* "$CHROOT_DIR/usr/share/bootmixs/branding/"
+    fi
+
+    # Scripts (copy into /usr/local/bin/bootmixs-scripts and run post-install if present)
+    if [ -d "$CONFIG_DIR/scripts" ]; then
+        sudo mkdir -p "$CHROOT_DIR/usr/local/bin/bootmixs-scripts"
+        sudo cp -r "$CONFIG_DIR/scripts/"* "$CHROOT_DIR/usr/local/bin/bootmixs-scripts/"
+        if [ -f "$CONFIG_DIR/scripts/post-install.sh" ]; then
+            sudo chroot "$CHROOT_DIR" /bin/bash /usr/local/bin/bootmixs-scripts/post-install.sh | tee -a "$LOGFILE"
+        fi
+    fi
+
+    # Services (systemd units)
+    if [ -d "$CONFIG_DIR/services" ]; then
+        sudo cp -r "$CONFIG_DIR/services/"* "$CHROOT_DIR/etc/systemd/system/"
+        for svc in "$CONFIG_DIR/services/"*.service; do
+            [ -f "$svc" ] && svcname=$(basename "$svc") && \
+            sudo chroot "$CHROOT_DIR" systemctl enable "$svcname" || true
+        done
+    fi
+
+    # Network configs
+    if [ -d "$CONFIG_DIR/network" ]; then
+        # For classic Debian/Ubuntu networking
+        if [ -f "$CONFIG_DIR/network/interfaces.conf" ]; then
+            sudo cp "$CONFIG_DIR/network/interfaces.conf" "$CHROOT_DIR/etc/network/interfaces"
+        fi
+        # For netplan (Ubuntu newer releases)
+        for netfile in "$CONFIG_DIR/network/"*.yaml; do
+            [ -f "$netfile" ] && sudo cp "$netfile" "$CHROOT_DIR/etc/netplan/"
+        done
+    fi
+
+    # Security (sudoers, etc.)
+    if [ -d "$CONFIG_DIR/security" ]; then
+        sudo mkdir -p "$CHROOT_DIR/etc/sudoers.d"
+        for secfile in "$CONFIG_DIR/security/"*; do
+            [ -f "$secfile" ] && sudo cp "$secfile" "$CHROOT_DIR/etc/sudoers.d/"
+        done
+    fi
+
+    log "All configs applied."
 }
+
 
 function build_iso() {
     log "Building ISO..."
